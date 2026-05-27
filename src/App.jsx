@@ -10,7 +10,8 @@ import {
   Lock, User, Send, Activity, Shield, UserCheck, Users, CalendarDays,
   TrendingUp, EyeOff, RefreshCw, AlertCircle, UserPlus, ArrowRightLeft,
   Award, BarChart3, Plus, Trash2, Edit3, Ban, Settings, UserX,
-  XCircle, RotateCcw, Copy, UserPlus2
+  XCircle, RotateCcw, Copy, UserPlus2, Mic2, Coffee, MapPin, ClipboardCheck,
+  Sparkles, Archive, ArchiveRestore
 } from "lucide-react";
 
 // Configure o Supabase:
@@ -146,6 +147,24 @@ const DC = {
 };
 const GRUPOS = ["Gestão","Eventos","Doc. A","Doc. B"];
 
+// CONSTANTES DA AGENDA "CONHEÇA O IFSP"
+const ATIV_TIPOS = {
+  palestra:    {label:"Palestra",      ic:Mic2,           bg:"#1E3A5F",bd:"#3B82F6",tx:"#93C5FD"},
+  coffee:      {label:"Coffee Break",  ic:Coffee,         bg:"#3D2E14",bd:"#F59E0B",tx:"#FCD34D"},
+  rota:        {label:"Rota IFSP",     ic:MapPin,         bg:"#14422E",bd:"#10B981",tx:"#6EE7B7"},
+  checklist:   {label:"Checklist Sala",ic:ClipboardCheck, bg:"#3B2E5C",bd:"#A78BFA",tx:"#C4B5FD"},
+  outra:       {label:"Outra",         ic:Sparkles,       bg:"#1F2937",bd:"#94A3B8",tx:"#CBD5E1"},
+};
+const COFFEE_STATUS = ["Cotando","Aprovado","Entregue","Realizado"];
+const ATIV_STATUS = ["Planejado","Confirmado","Em andamento","Concluído","Cancelado"];
+const ATIV_STATUS_COLOR = {
+  "Planejado":    {bg:"#1F2937",tx:"#94A3B8"},
+  "Confirmado":   {bg:"#1E3A5F",tx:"#60A5FA"},
+  "Em andamento": {bg:"#3D2E14",tx:"#FBBF24"},
+  "Concluído":    {bg:"#14422E",tx:"#34D399"},
+  "Cancelado":    {bg:"#4C1D24",tx:"#F87171"},
+};
+
 // HELPERS
 const fmtT = ts => new Date(ts).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
 const fmtD = ts => ts ? new Date(ts).toLocaleDateString('pt-BR') : "—";
@@ -254,7 +273,7 @@ function Login({onLogin,users}){
 // APP
 export default function App(){
   const[user,setUser]=useState(null);
-  const[state,setState]=useState({docs:[],comments:{},history:[],presence:{},users:INITIAL_USERS,cancelReqs:{}});
+  const[state,setState]=useState({docs:[],comments:{},history:[],presence:{},users:INITIAL_USERS,cancelReqs:{},eventDays:[]});
   const[tab,setTab]=useState("dashboard");
   const[loaded,setLoaded]=useState(false);
   const[syncing,setSyncing]=useState(false);
@@ -277,9 +296,20 @@ export default function App(){
         s.users=s.users||INITIAL_USERS;
         s.cancelReqs=s.cancelReqs||{};
         s.docs=s.docs.map(d=>({...blankDoc(),...d}));
+        // Inicializa estrutura do evento se não existir
+        if(!s.eventDays){
+          s.eventDays=[{
+            id:`d_${Date.now()}`,
+            label:"Dia 1",
+            date:null,
+            tema:"",
+            archived:false,
+            activities:[]
+          }];
+        }
         if(!cancelled){setState(s);setLoaded(true);}
       }catch{
-        if(!cancelled){setState({docs:INITIAL_DOCS.map(d=>({...d,...blankDoc()})),comments:{},history:[],presence:{},users:INITIAL_USERS,cancelReqs:{}});setLoaded(true);}
+        if(!cancelled){setState({docs:INITIAL_DOCS.map(d=>({...d,...blankDoc()})),comments:{},history:[],presence:{},users:INITIAL_USERS,cancelReqs:{},eventDays:[{id:`d_${Date.now()}`,label:"Dia 1",date:null,tema:"",archived:false,activities:[]}]});setLoaded(true);}
       }
     })();
     return()=>{cancelled=true;};
@@ -489,6 +519,85 @@ export default function App(){
     return{ok:true};
   },[user,save]);
 
+  // ─── HANDLERS DA AGENDA "CONHEÇA O IFSP" ─────────────────
+  // Permissão para editar: Gestão + Eventos
+  const canEditEvent = user && (user.role==="gestor" || user.grupo==="Eventos");
+
+  const addEventDay=useCallback(()=>{
+    if(!canEditEvent)return{ok:false,msg:"Sem permissão"};
+    push(s=>{
+      const days=s.eventDays||[];
+      const visibles=days.filter(d=>!d.archived);
+      const nextNum=visibles.length+1;
+      const newDay={id:`d_${Date.now()}`,label:`Dia ${nextNum}`,date:null,tema:"",archived:false,activities:[]};
+      return addHist({...s,eventDays:[...days,newDay]},{ts:now(),user:user.name,action:"event_day_added",targetDay:newDay.label});
+    });
+    return{ok:true};
+  },[user,canEditEvent,save]);
+
+  const updateEventDay=useCallback((dayId,changes)=>{
+    if(!canEditEvent)return{ok:false};
+    push(s=>{
+      const days=(s.eventDays||[]).map(d=>d.id===dayId?{...d,...changes}:d);
+      return addHist({...s,eventDays:days},{ts:now(),user:user.name,action:"event_day_updated",targetDay:dayId,changes:Object.keys(changes).join(", ")});
+    });
+    return{ok:true};
+  },[user,canEditEvent,save]);
+
+  const removeEventDay=useCallback((dayId)=>{
+    if(!canEditEvent)return{ok:false};
+    const day=ref.current.eventDays?.find(d=>d.id===dayId);
+    if(!day)return{ok:false};
+    if(day.activities&&day.activities.length>0)return{ok:false,msg:"Dia tem atividades. Arquive ao invés de excluir."};
+    push(s=>{
+      const days=(s.eventDays||[]).filter(d=>d.id!==dayId);
+      return addHist({...s,eventDays:days},{ts:now(),user:user.name,action:"event_day_removed",targetDay:day.label});
+    });
+    return{ok:true};
+  },[user,canEditEvent,save]);
+
+  const toggleArchiveDay=useCallback((dayId)=>{
+    if(!canEditEvent)return{ok:false};
+    push(s=>{
+      const days=(s.eventDays||[]).map(d=>d.id===dayId?{...d,archived:!d.archived}:d);
+      const day=days.find(d=>d.id===dayId);
+      return addHist({...s,eventDays:days},{ts:now(),user:user.name,action:day.archived?"event_day_archived":"event_day_restored",targetDay:day.label});
+    });
+    return{ok:true};
+  },[user,canEditEvent,save]);
+
+  const addActivity=useCallback((dayId,activity)=>{
+    if(!canEditEvent)return{ok:false};
+    push(s=>{
+      const newAct={id:`a_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,createdAt:now(),createdBy:user.name,status:"Planejado",...activity};
+      const days=(s.eventDays||[]).map(d=>d.id===dayId?{...d,activities:[...(d.activities||[]),newAct]}:d);
+      return addHist({...s,eventDays:days},{ts:now(),user:user.name,action:"event_activity_added",targetDay:dayId,activityType:activity.tipo,activityName:activity.titulo});
+    });
+    return{ok:true};
+  },[user,canEditEvent,save]);
+
+  const updateActivity=useCallback((dayId,activityId,changes)=>{
+    if(!canEditEvent)return{ok:false};
+    push(s=>{
+      const days=(s.eventDays||[]).map(d=>{
+        if(d.id!==dayId)return d;
+        return{...d,activities:(d.activities||[]).map(a=>a.id===activityId?{...a,...changes,_updatedAt:now(),_updatedBy:user.name}:a)};
+      });
+      const ch=Object.keys(changes).filter(k=>!k.startsWith("_")).join(", ");
+      return addHist({...s,eventDays:days},{ts:now(),user:user.name,action:"event_activity_updated",targetDay:dayId,activityId,changes:ch});
+    });
+    return{ok:true};
+  },[user,canEditEvent,save]);
+
+  const removeActivity=useCallback((dayId,activityId)=>{
+    if(!canEditEvent)return{ok:false};
+    push(s=>{
+      const days=(s.eventDays||[]).map(d=>d.id===dayId?{...d,activities:(d.activities||[]).filter(a=>a.id!==activityId)}:d);
+      return addHist({...s,eventDays:days},{ts:now(),user:user.name,action:"event_activity_removed",targetDay:dayId,activityId});
+    });
+    return{ok:true};
+  },[user,canEditEvent,save]);
+
   if(!user)return<Login onLogin={setUser} users={state.users}/>;
   if(!loaded)return<div className="min-h-screen bg-slate-950 flex items-center justify-center"><div className="flex items-center gap-3 text-slate-400"><div className="w-5 h-5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"/><span className="text-sm">Carregando...</span></div></div>;
 
@@ -501,6 +610,9 @@ export default function App(){
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-5">
         {tab==="dashboard"&&<Dashboard docs={state.docs} history={state.history} cancelReqs={state.cancelReqs} isGestor={user.role==="gestor"}/>}
         {tab==="documentos"&&<DocList state={state} user={user} onStatus={updateStatus} onComment={addComment} onPrazo={updatePrazo} onResp={updateResp} onGrupo={updateGrupo} onAddDoc={addDoc} onRemoveDoc={removeDoc} onCancel={cancelDoc} onApprove={approveCancel} onReativar={reativar}/>}
+        {tab==="evento"&&<EventoIFSP eventDays={state.eventDays||[]} users={state.users} user={user} canEdit={canEditEvent}
+          onAddDay={addEventDay} onUpdateDay={updateEventDay} onRemoveDay={removeEventDay} onToggleArchive={toggleArchiveDay}
+          onAddActivity={addActivity} onUpdateActivity={updateActivity} onRemoveActivity={removeActivity}/>}
         {tab==="atividades"&&<Atividades history={state.history} isV={isV} users={state.users} isGestor={user.role==="gestor"}/>}
         {tab==="desempenho"&&<Desempenho docs={state.docs} history={state.history} users={state.users}/>}
         {tab==="usuarios"&&user.role==="gestor"&&<Usuarios users={state.users} currentUser={user} onAdd={addUser} onEdit={editUser} onToggle={toggleActive} onRemove={removeUser}/>}
@@ -518,6 +630,7 @@ function TopBar({user,presence,onLogout,tab,setTab,syncing,pCancel}){
   const tabs=[
     {id:"dashboard",label:"Dashboard",icon:LayoutDashboard,show:true},
     {id:"documentos",label:"Documentos",icon:ListChecks,show:true,badge:pCancel>0&&user.role==="gestor"?pCancel:null},
+    {id:"evento",label:"Conheça o IFSP",icon:CalendarDays,show:true},
     {id:"atividades",label:"Atividades",icon:History,show:true},
     {id:"desempenho",label:"Desempenho",icon:Award,show:true},
     {id:"usuarios",label:"Usuários",icon:Settings,show:user.role==="gestor"},
@@ -1101,7 +1214,7 @@ function Atividades({history,isV,users,isGestor}){
 
 function AItem({item,compact=false,users}){
   const a=item.action;const sc=a==="status_change"?SC[item.to]:null;
-  const I=sc?sc.ic:a==="visit"?UserCheck:a==="prazo_change"?CalendarDays:a==="responsavel_change"?UserPlus:a==="grupo_change"?ArrowRightLeft:a==="doc_added"?Plus:a==="doc_removed"?Trash2:a==="doc_reactivated"?RotateCcw:a?.startsWith("cancel")?Ban:a?.startsWith("user_")?Settings:MessageSquare;
+  const I=sc?sc.ic:a==="visit"?UserCheck:a==="prazo_change"?CalendarDays:a==="responsavel_change"?UserPlus:a==="grupo_change"?ArrowRightLeft:a==="doc_added"?Plus:a==="doc_removed"?Trash2:a==="doc_reactivated"?RotateCcw:a?.startsWith("cancel")?Ban:a?.startsWith("user_")?Settings:a?.startsWith("event_")?CalendarDays:MessageSquare;
   const ui=users?.[item.user];const col=sc?.tx||"#94A3B8";
   return(
     <div className={`flex items-start gap-3 ${compact?"p-2":"p-3"}`}>
@@ -1128,6 +1241,14 @@ function AItem({item,compact=false,users}){
           {a==="user_inactivated"&&<> inativou <span className="text-amber-400 font-medium">{item.targetUser}</span></>}
           {a==="user_reactivated"&&<> reativou <span className="text-emerald-400 font-medium">{item.targetUser}</span></>}
           {a==="user_removed"&&<> excluiu <span className="text-red-400 font-medium">{item.targetUser}</span></>}
+          {a==="event_day_added"&&<> criou dia <span className="text-emerald-400 font-medium">{item.targetDay}</span> no evento</>}
+          {a==="event_day_updated"&&<> editou dia <span className="text-blue-400 font-medium">{item.targetDay}</span> ({item.changes})</>}
+          {a==="event_day_removed"&&<> excluiu dia <span className="text-red-400 font-medium">{item.targetDay}</span></>}
+          {a==="event_day_archived"&&<> arquivou dia <span className="text-amber-400 font-medium">{item.targetDay}</span></>}
+          {a==="event_day_restored"&&<> restaurou dia <span className="text-emerald-400 font-medium">{item.targetDay}</span></>}
+          {a==="event_activity_added"&&<> adicionou atividade <span className="text-emerald-400 font-medium">{item.activityName||item.activityType}</span></>}
+          {a==="event_activity_updated"&&<> editou atividade ({item.changes})</>}
+          {a==="event_activity_removed"&&<> removeu atividade do evento</>}
         </div>
         {!compact&&item.docName&&<p className="text-[11px] text-slate-500 mt-0.5 truncate">{item.docName}</p>}
         {!compact&&a==="comment"&&item.text&&<p className="text-[11px] text-slate-400 mt-1 italic line-clamp-2">"{item.text}"</p>}
@@ -1350,8 +1471,411 @@ function NewUserModal({name,pwd,onClose}){
 }
 
 // EXPORTAR
+// ─── AGENDA CONHEÇA O IFSP ─────────────────────────────────────────
+// Helper: parsear "15h-16h30" ou "15:00-16:30" para minutos do início (ordenação)
+const parseHorarioInicio=(h)=>{
+  if(!h||typeof h!=="string")return 99999;
+  const m=h.match(/(\d{1,2})[h:](\d{0,2})/);
+  if(!m)return 99999;
+  return parseInt(m[1])*60+parseInt(m[2]||"0");
+};
+
+function EventoIFSP({eventDays,users,user,canEdit,onAddDay,onUpdateDay,onRemoveDay,onToggleArchive,onAddActivity,onUpdateActivity,onRemoveActivity}){
+  const[showArchived,setShowArchived]=useState(false);
+  const[editingDay,setEditingDay]=useState(null);
+  const[deleteConfirm,setDeleteConfirm]=useState(null);
+  const[archiveConfirm,setArchiveConfirm]=useState(null);
+  const[actModal,setActModal]=useState(null); // {dayId, activity?}
+
+  const visibleDays=eventDays.filter(d=>showArchived?d.archived:!d.archived);
+  const archivedCount=eventDays.filter(d=>d.archived).length;
+
+  return(
+    <div className="space-y-4">
+      <div className="flex items-end justify-between gap-2 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2"><CalendarDays className="w-6 h-6 text-emerald-400"/>Conheça o IFSP</h1>
+          <p className="text-sm text-slate-400">Agenda da semana de eventos · {visibleDays.length} dia{visibleDays.length!==1?"s":""}{showArchived?" arquivado(s)":""}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {archivedCount>0&&(
+            <button onClick={()=>setShowArchived(!showArchived)} className={`flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border ${showArchived?"bg-amber-900/40 border-amber-700 text-amber-300":"bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200"}`}>
+              {showArchived?<ArchiveRestore className="w-3.5 h-3.5"/>:<Archive className="w-3.5 h-3.5"/>}
+              {showArchived?"Ver ativos":`Arquivados (${archivedCount})`}
+            </button>
+          )}
+          {canEdit&&!showArchived&&(
+            <button onClick={()=>onAddDay()} className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg">
+              <Plus className="w-4 h-4"/>Novo dia
+            </button>
+          )}
+        </div>
+      </div>
+
+      {!canEdit&&(
+        <div className="bg-blue-950/30 border border-blue-800/50 rounded-lg p-3 text-[11px] text-blue-300 flex items-start gap-2">
+          <Eye className="w-4 h-4 flex-shrink-0 mt-0.5"/>
+          <div>Você está visualizando a agenda. Apenas integrantes de <strong>Eventos</strong> e <strong>Gestão</strong> podem editar.</div>
+        </div>
+      )}
+
+      {visibleDays.length===0?(
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-12 text-center">
+          <CalendarDays className="w-12 h-12 text-slate-700 mx-auto mb-3"/>
+          <p className="text-slate-400 text-sm">{showArchived?"Nenhum dia arquivado":"Nenhum dia cadastrado"}</p>
+          {canEdit&&!showArchived&&<button onClick={()=>onAddDay()} className="mt-3 text-emerald-400 hover:text-emerald-300 text-xs font-semibold">+ Adicionar primeiro dia</button>}
+        </div>
+      ):(
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {visibleDays.map(day=>(
+            <DayCard key={day.id} day={day} users={users} canEdit={canEdit}
+              onEdit={()=>setEditingDay(day)}
+              onArchive={()=>setArchiveConfirm(day)}
+              onDelete={()=>setDeleteConfirm(day)}
+              onAddActivity={()=>setActModal({dayId:day.id})}
+              onEditActivity={(act)=>setActModal({dayId:day.id,activity:act})}
+              onRemoveActivity={(actId)=>onRemoveActivity(day.id,actId)}
+              showArchived={showArchived}
+              onRestore={()=>onToggleArchive(day.id)}/>
+          ))}
+        </div>
+      )}
+
+      {/* Modais */}
+      {editingDay&&<EditDayModal day={editingDay} onSave={(changes)=>{onUpdateDay(editingDay.id,changes);setEditingDay(null);}} onClose={()=>setEditingDay(null)}/>}
+      {actModal&&<ActivityModal data={actModal} users={users}
+        onSave={(act)=>{
+          if(actModal.activity)onUpdateActivity(actModal.dayId,actModal.activity.id,act);
+          else onAddActivity(actModal.dayId,act);
+          setActModal(null);
+        }}
+        onClose={()=>setActModal(null)}/>}
+      {deleteConfirm&&<ConfirmDayModal day={deleteConfirm} mode="delete"
+        onConfirm={()=>{const r=onRemoveDay(deleteConfirm.id);if(!r.ok&&r.msg)alert(r.msg);setDeleteConfirm(null);}}
+        onClose={()=>setDeleteConfirm(null)}/>}
+      {archiveConfirm&&<ConfirmDayModal day={archiveConfirm} mode="archive"
+        onConfirm={()=>{onToggleArchive(archiveConfirm.id);setArchiveConfirm(null);}}
+        onClose={()=>setArchiveConfirm(null)}/>}
+    </div>
+  );
+}
+
+function DayCard({day,users,canEdit,onEdit,onArchive,onDelete,onAddActivity,onEditActivity,onRemoveActivity,showArchived,onRestore}){
+  const sortedActs=useMemo(()=>[...(day.activities||[])].sort((a,b)=>parseHorarioInicio(a.horario)-parseHorarioInicio(b.horario)),[day.activities]);
+  const tipoCount=useMemo(()=>{
+    const c={};(day.activities||[]).forEach(a=>{c[a.tipo]=(c[a.tipo]||0)+1;});return c;
+  },[day.activities]);
+
+  return(
+    <div className={`bg-slate-900 border ${day.archived?"border-amber-900/40":"border-slate-800"} rounded-xl overflow-hidden`}>
+      <div className={`px-4 py-3 ${day.archived?"bg-amber-950/20":"bg-slate-800/40"} border-b border-slate-800`}>
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-base font-bold text-white">{day.label}</h2>
+              {day.date&&<span className="text-[11px] bg-emerald-950/40 text-emerald-300 px-2 py-0.5 rounded font-semibold">{fmtD(day.date)}</span>}
+              {day.archived&&<span className="text-[10px] bg-amber-950/60 text-amber-300 px-1.5 py-0.5 rounded font-bold uppercase flex items-center gap-1"><Archive className="w-2.5 h-2.5"/>Arquivado</span>}
+            </div>
+            {day.tema&&<p className="text-xs text-slate-400 mt-0.5">{day.tema}</p>}
+          </div>
+          {canEdit&&(
+            <div className="flex items-center gap-1 flex-shrink-0">
+              {showArchived?(
+                <button onClick={onRestore} className="p-1.5 text-slate-400 hover:text-emerald-400 hover:bg-slate-800 rounded" title="Restaurar"><ArchiveRestore className="w-3.5 h-3.5"/></button>
+              ):(<>
+                <button onClick={onEdit} className="p-1.5 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded" title="Editar"><Edit3 className="w-3.5 h-3.5"/></button>
+                {(day.activities||[]).length>0?
+                  <button onClick={onArchive} className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded" title="Arquivar"><Archive className="w-3.5 h-3.5"/></button>
+                  :<button onClick={onDelete} className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-slate-800 rounded" title="Excluir"><Trash2 className="w-3.5 h-3.5"/></button>
+                }
+              </>)}
+            </div>
+          )}
+        </div>
+        {Object.keys(tipoCount).length>0&&(
+          <div className="flex items-center gap-2 mt-2 flex-wrap">
+            {Object.entries(tipoCount).map(([tipo,n])=>{
+              const t=ATIV_TIPOS[tipo]||ATIV_TIPOS.outra;const I=t.ic;
+              return<span key={tipo} className="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded" style={{background:t.bg,color:t.tx}}><I className="w-2.5 h-2.5"/>{n}</span>;
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="divide-y divide-slate-800">
+        {sortedActs.length===0?(
+          <div className="p-6 text-center">
+            <p className="text-xs text-slate-500 mb-2">Nenhuma atividade cadastrada</p>
+            {canEdit&&!showArchived&&<button onClick={onAddActivity} className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold">+ Adicionar atividade</button>}
+          </div>
+        ):sortedActs.map(act=>(
+          <ActivityRow key={act.id} activity={act} canEdit={canEdit&&!showArchived}
+            onEdit={()=>onEditActivity(act)}
+            onRemove={()=>{if(confirm(`Excluir "${act.titulo}"?`))onRemoveActivity(act.id);}}/>
+        ))}
+      </div>
+
+      {canEdit&&!showArchived&&sortedActs.length>0&&(
+        <div className="px-4 py-2 bg-slate-800/30 border-t border-slate-800">
+          <button onClick={onAddActivity} className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1"><Plus className="w-3 h-3"/>Adicionar atividade</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActivityRow({activity,canEdit,onEdit,onRemove}){
+  const t=ATIV_TIPOS[activity.tipo]||ATIV_TIPOS.outra;const I=t.ic;
+  const sc=ATIV_STATUS_COLOR[activity.status]||ATIV_STATUS_COLOR["Planejado"];
+  return(
+    <div className="px-4 py-3 hover:bg-slate-800/20 transition-colors">
+      <div className="flex items-start gap-3">
+        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{background:t.bg,border:`1px solid ${t.bd}40`}}>
+          <I className="w-4 h-4" style={{color:t.tx}}/>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start gap-2 flex-wrap">
+            <span className="text-sm font-semibold text-white">{activity.titulo||t.label}</span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider" style={{background:t.bg,color:t.tx}}>{t.label}</span>
+            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded" style={{background:sc.bg,color:sc.tx}}>{activity.status}</span>
+            {activity.tipo==="coffee"&&activity.coffeeStatus&&<span className="text-[10px] bg-amber-950/40 text-amber-300 px-1.5 py-0.5 rounded font-semibold">{activity.coffeeStatus}</span>}
+          </div>
+          <div className="flex items-center gap-2 mt-1 flex-wrap text-[11px] text-slate-400">
+            {activity.horario&&<span className="flex items-center gap-1"><Clock className="w-3 h-3"/>{activity.horario}</span>}
+            {activity.local&&<span className="flex items-center gap-1"><MapPin className="w-3 h-3"/>{activity.local}</span>}
+            {activity.responsavel&&<span className="flex items-center gap-1"><User className="w-3 h-3"/>{activity.responsavel}</span>}
+            {activity.tipo==="checklist"&&activity.momento&&<span className="text-[10px] bg-slate-800 px-1.5 py-0.5 rounded">{activity.momento}</span>}
+          </div>
+          {activity.tipo==="palestra"&&activity.palestrante&&(
+            <p className="text-[11px] text-slate-300 mt-1"><strong>Palestrante:</strong> {activity.palestrante}{activity.contato&&` · ${activity.contato}`}</p>
+          )}
+          {activity.tipo==="palestra"&&activity.topico&&(
+            <p className="text-[11px] text-slate-400 mt-0.5 italic">"{activity.topico}"</p>
+          )}
+          {activity.tipo==="palestra"&&activity.bio&&(
+            <p className="text-[10px] text-slate-500 mt-0.5 line-clamp-2">{activity.bio}</p>
+          )}
+          {activity.tipo==="coffee"&&activity.fornecedor&&(
+            <p className="text-[11px] text-slate-300 mt-1"><strong>Fornecedor:</strong> {activity.fornecedor}</p>
+          )}
+          {activity.observacoes&&(
+            <p className="text-[11px] text-slate-400 mt-1 italic">📝 {activity.observacoes}</p>
+          )}
+        </div>
+        {canEdit&&(
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <button onClick={onEdit} className="p-1.5 text-slate-500 hover:text-blue-400 hover:bg-slate-800 rounded" title="Editar"><Edit3 className="w-3 h-3"/></button>
+            <button onClick={onRemove} className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded" title="Excluir"><Trash2 className="w-3 h-3"/></button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EditDayModal({day,onSave,onClose}){
+  const[d,setD]=useState({label:day.label||"",date:day.date?new Date(day.date).toISOString().slice(0,10):"",tema:day.tema||""});
+  const go=()=>{
+    const changes={};
+    if(d.label!==day.label)changes.label=d.label.trim()||"Dia";
+    const newDateTs=d.date?new Date(d.date+"T19:00:00").getTime():null;
+    if(newDateTs!==day.date)changes.date=newDateTs;
+    if(d.tema!==day.tema)changes.tema=d.tema.trim();
+    onSave(changes);
+  };
+  return(
+    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+      <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2"><Edit3 className="w-5 h-5 text-blue-400"/>Editar dia</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-white"><X className="w-5 h-5"/></button>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-[10px] text-slate-400 mb-1 uppercase">Rótulo</label>
+            <input value={d.label} onChange={e=>setD({...d,label:e.target.value})} placeholder="Ex: Dia 1, Abertura..." className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/>
+          </div>
+          <div>
+            <label className="block text-[10px] text-slate-400 mb-1 uppercase">Data (opcional)</label>
+            <input type="date" value={d.date} onChange={e=>setD({...d,date:e.target.value})} className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/>
+          </div>
+          <div>
+            <label className="block text-[10px] text-slate-400 mb-1 uppercase">Tema do dia (opcional)</label>
+            <input value={d.tema} onChange={e=>setD({...d,tema:e.target.value})} placeholder="Ex: Abertura, Robótica..." className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/>
+          </div>
+          <div className="flex gap-2 pt-2">
+            <button onClick={go} className="flex-1 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold py-2 rounded-lg">Salvar</button>
+            <button onClick={onClose} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-sm font-semibold py-2 rounded-lg">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ActivityModal({data,users,onSave,onClose}){
+  const isEdit=!!data.activity;
+  const a0=data.activity||{};
+  const[a,setA]=useState({
+    tipo:a0.tipo||"palestra",
+    titulo:a0.titulo||"",
+    horario:a0.horario||"",
+    local:a0.local||"",
+    responsavel:a0.responsavel||"",
+    status:a0.status||"Planejado",
+    observacoes:a0.observacoes||"",
+    // palestra
+    palestrante:a0.palestrante||"",
+    contato:a0.contato||"",
+    topico:a0.topico||"",
+    bio:a0.bio||"",
+    // coffee
+    fornecedor:a0.fornecedor||"",
+    coffeeStatus:a0.coffeeStatus||"Cotando",
+    // checklist
+    momento:a0.momento||"Pré-evento",
+  });
+  const[respMode,setRespMode]=useState(a.responsavel&&!users[a.responsavel]?"livre":"lista");
+  const[err,setErr]=useState("");
+
+  const userNames=Object.keys(users||{}).filter(n=>users[n].ativo);
+
+  const go=()=>{
+    if(!a.titulo.trim()&&a.tipo==="outra")return setErr("Título obrigatório para tipo 'Outra'");
+    if(a.tipo==="palestra"&&!a.palestrante.trim())return setErr("Nome do palestrante obrigatório");
+    if(a.tipo==="coffee"&&!a.fornecedor.trim()&&!a.observacoes.trim())return setErr("Informe fornecedor ou observações");
+    if(!a.horario.trim())return setErr("Horário obrigatório (ex: 19h-20h)");
+    // limpar campos não relevantes para o tipo
+    const clean={tipo:a.tipo,titulo:a.titulo.trim(),horario:a.horario.trim(),local:a.local.trim(),responsavel:a.responsavel.trim()||null,status:a.status,observacoes:a.observacoes.trim()};
+    if(a.tipo==="palestra"){clean.palestrante=a.palestrante.trim();clean.contato=a.contato.trim();clean.topico=a.topico.trim();clean.bio=a.bio.trim();if(!clean.titulo)clean.titulo=clean.topico||clean.palestrante;}
+    if(a.tipo==="coffee"){clean.fornecedor=a.fornecedor.trim();clean.coffeeStatus=a.coffeeStatus;if(!clean.titulo)clean.titulo="Coffee Break";}
+    if(a.tipo==="rota"&&!clean.titulo)clean.titulo="Rota Conheça IFSP";
+    if(a.tipo==="checklist"){clean.momento=a.momento;if(!clean.titulo)clean.titulo=`Checklist ${a.momento}`;}
+    onSave(clean);
+  };
+
+  const tipoConf=ATIV_TIPOS[a.tipo];const TI=tipoConf.ic;
+
+  return(
+    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+      <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-6 py-4 flex items-center justify-between z-10">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2">
+            <TI className="w-5 h-5" style={{color:tipoConf.tx}}/>
+            {isEdit?"Editar atividade":"Nova atividade"}
+          </h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-white"><X className="w-5 h-5"/></button>
+        </div>
+        <div className="p-6 space-y-3">
+          {/* Tipo */}
+          <div>
+            <label className="block text-[10px] text-slate-400 mb-1.5 uppercase">Tipo</label>
+            <div className="grid grid-cols-5 gap-1.5">
+              {Object.entries(ATIV_TIPOS).map(([k,t])=>{const I=t.ic;return(
+                <button key={k} type="button" onClick={()=>setA({...a,tipo:k})} className={`p-2 rounded-lg border text-[10px] font-semibold flex flex-col items-center gap-1 ${a.tipo===k?"border-emerald-500 bg-emerald-950/30 text-emerald-300":"border-slate-700 bg-slate-800 text-slate-400 hover:text-slate-200"}`}>
+                  <I className="w-4 h-4"/>{t.label}
+                </button>
+              );})}
+            </div>
+          </div>
+
+          {/* Campos específicos por tipo */}
+          {a.tipo==="palestra"&&<>
+            <div><label className="block text-[10px] text-slate-400 mb-1 uppercase">Palestrante *</label><input value={a.palestrante} onChange={e=>setA({...a,palestrante:e.target.value})} className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/></div>
+            <div><label className="block text-[10px] text-slate-400 mb-1 uppercase">Contato</label><input value={a.contato} onChange={e=>setA({...a,contato:e.target.value})} placeholder="E-mail, telefone..." className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/></div>
+            <div><label className="block text-[10px] text-slate-400 mb-1 uppercase">Tópico</label><input value={a.topico} onChange={e=>setA({...a,topico:e.target.value})} placeholder="Tema da palestra" className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/></div>
+            <div><label className="block text-[10px] text-slate-400 mb-1 uppercase">Bio (mini-currículo)</label><textarea value={a.bio} onChange={e=>setA({...a,bio:e.target.value})} rows={2} className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/></div>
+          </>}
+
+          {a.tipo==="coffee"&&<>
+            <div><label className="block text-[10px] text-slate-400 mb-1 uppercase">Fornecedor</label><input value={a.fornecedor} onChange={e=>setA({...a,fornecedor:e.target.value})} className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/></div>
+            <div><label className="block text-[10px] text-slate-400 mb-1 uppercase">Status da negociação</label>
+              <select value={a.coffeeStatus} onChange={e=>setA({...a,coffeeStatus:e.target.value})} className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500">
+                {COFFEE_STATUS.map(s=><option key={s}>{s}</option>)}
+              </select></div>
+          </>}
+
+          {a.tipo==="checklist"&&<>
+            <div><label className="block text-[10px] text-slate-400 mb-1 uppercase">Momento</label>
+              <select value={a.momento} onChange={e=>setA({...a,momento:e.target.value})} className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500">
+                <option>Pré-evento</option><option>Pós-evento</option>
+              </select></div>
+          </>}
+
+          {a.tipo==="outra"&&(
+            <div><label className="block text-[10px] text-slate-400 mb-1 uppercase">Título *</label><input value={a.titulo} onChange={e=>setA({...a,titulo:e.target.value})} className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/></div>
+          )}
+
+          {/* Campos comuns */}
+          <div>
+            <label className="block text-[10px] text-slate-400 mb-1 uppercase">Horário * (ex: 19h-20h ou 19:00-20:00)</label>
+            <input value={a.horario} onChange={e=>setA({...a,horario:e.target.value})} placeholder="19h-20h30" className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/>
+          </div>
+          <div>
+            <label className="block text-[10px] text-slate-400 mb-1 uppercase">Local / Sala</label>
+            <input value={a.local} onChange={e=>setA({...a,local:e.target.value})} placeholder="Ex: Auditório, Lab. 5..." className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/>
+          </div>
+          <div>
+            <label className="block text-[10px] text-slate-400 mb-1 uppercase flex items-center justify-between">
+              <span>Responsável da equipe</span>
+              <div className="flex gap-1 normal-case">
+                <button type="button" onClick={()=>{setRespMode("lista");setA({...a,responsavel:""});}} className={`text-[10px] px-2 py-0.5 rounded ${respMode==="lista"?"bg-emerald-700 text-white":"bg-slate-700 text-slate-300"}`}>Da equipe</button>
+                <button type="button" onClick={()=>{setRespMode("livre");setA({...a,responsavel:""});}} className={`text-[10px] px-2 py-0.5 rounded ${respMode==="livre"?"bg-emerald-700 text-white":"bg-slate-700 text-slate-300"}`}>Digitar</button>
+              </div>
+            </label>
+            {respMode==="lista"?(
+              <select value={a.responsavel} onChange={e=>setA({...a,responsavel:e.target.value})} className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500">
+                <option value="">— Sem responsável —</option>
+                {userNames.map(n=><option key={n}>{n}</option>)}
+              </select>
+            ):(
+              <input value={a.responsavel} onChange={e=>setA({...a,responsavel:e.target.value})} placeholder="Nome de quem for" className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/>
+            )}
+          </div>
+          <div>
+            <label className="block text-[10px] text-slate-400 mb-1 uppercase">Status</label>
+            <select value={a.status} onChange={e=>setA({...a,status:e.target.value})} className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500">
+              {ATIV_STATUS.map(s=><option key={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10px] text-slate-400 mb-1 uppercase">Observações</label>
+            <textarea value={a.observacoes} onChange={e=>setA({...a,observacoes:e.target.value})} rows={2} placeholder={a.tipo==="coffee"?"O que foi tratado com o fornecedor...":"Notas adicionais"} className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"/>
+          </div>
+          {err&&<p className="text-red-400 text-xs">{err}</p>}
+          <div className="flex gap-2 pt-2">
+            <button onClick={go} className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold py-2 rounded-lg">{isEdit?"Salvar":"Adicionar"}</button>
+            <button onClick={onClose} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-sm font-semibold py-2 rounded-lg">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDayModal({day,mode,onConfirm,onClose}){
+  const isDelete=mode==="delete";
+  return(
+    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+      <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-6 w-full max-w-md">
+        <h2 className={`text-lg font-bold mb-3 flex items-center gap-2 ${isDelete?"text-red-400":"text-amber-400"}`}>
+          {isDelete?<><Trash2 className="w-5 h-5"/>Excluir dia</>:<><Archive className="w-5 h-5"/>Arquivar dia</>}
+        </h2>
+        <p className="text-sm text-slate-300 mb-4">
+          {isDelete?(<>Excluir <strong className="text-white">{day.label}</strong> permanentemente? Esta ação não pode ser desfeita.</>):
+          (<>Arquivar <strong className="text-white">{day.label}</strong> com suas {day.activities?.length||0} atividade(s)? O dia ficará oculto mas pode ser restaurado depois.</>)}
+        </p>
+        <div className="flex gap-2">
+          <button onClick={onConfirm} className={`flex-1 ${isDelete?"bg-red-600 hover:bg-red-500":"bg-amber-600 hover:bg-amber-500"} text-white text-sm font-semibold py-2 rounded-lg`}>{isDelete?"Excluir":"Arquivar"}</button>
+          <button onClick={onClose} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-sm font-semibold py-2 rounded-lg">Cancelar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Export({state}){
-  const{docs,comments,history,users}=state;
+  const{docs,comments,history,users,eventDays}=state;
 
   // Util: gera CSV a partir de matriz e dispara download
   const downloadCSV=(filename,rows)=>{
@@ -1443,6 +1967,46 @@ ${perf.map(p=>`<tr><td>${p.nome}</td><td>${p.total}</td><td>${p.concluidos}</td>
     downloadCSV("visitantes",rows);
   };
 
+  // ─── CONHEÇA O IFSP ─────────────────────────────
+  const expEventoCSV=()=>{
+    const rows=[["Dia","Data","Tema","Tipo","Título","Horário","Local","Responsável","Status","Detalhes"]];
+    (eventDays||[]).filter(d=>!d.archived).forEach(day=>{
+      const acts=[...(day.activities||[])].sort((a,b)=>parseHorarioInicio(a.horario)-parseHorarioInicio(b.horario));
+      if(acts.length===0){
+        rows.push([day.label,fmtD(day.date),day.tema||"","","","","","","",""]);
+      }else acts.forEach(a=>{
+        const tipoLabel=ATIV_TIPOS[a.tipo]?.label||a.tipo;
+        const det=[
+          a.tipo==="palestra"?`Palestrante: ${a.palestrante||"-"}${a.contato?" ("+a.contato+")":""}${a.topico?" | "+a.topico:""}`:"",
+          a.tipo==="coffee"?`Fornecedor: ${a.fornecedor||"-"} | Status: ${a.coffeeStatus||"-"}`:"",
+          a.tipo==="checklist"?`Momento: ${a.momento}`:"",
+          a.observacoes?`Obs: ${a.observacoes}`:""
+        ].filter(Boolean).join(" || ");
+        rows.push([day.label,fmtD(day.date),day.tema||"",tipoLabel,a.titulo||"",a.horario||"",a.local||"",a.responsavel||"",a.status,det]);
+      });
+    });
+    downloadCSV("agenda_evento",rows);
+  };
+  const expEventoHTML=()=>{
+    const days=(eventDays||[]).filter(d=>!d.archived);
+    const body=`<h1>Agenda — Conheça o IFSP</h1>
+${days.length===0?'<p class="muted">Sem dias cadastrados.</p>':days.map(day=>{
+  const acts=[...(day.activities||[])].sort((a,b)=>parseHorarioInicio(a.horario)-parseHorarioInicio(b.horario));
+  return `<h2>${day.label}${day.date?` — ${fmtD(day.date)}`:""}${day.tema?` · <span style="font-weight:normal">${day.tema}</span>`:""}</h2>
+${acts.length===0?'<p class="muted">Nenhuma atividade.</p>':`<table><thead><tr><th>Horário</th><th>Tipo</th><th>Atividade</th><th>Local</th><th>Responsável</th><th>Status</th></tr></thead><tbody>
+${acts.map(a=>{
+  const tipoLabel=ATIV_TIPOS[a.tipo]?.label||a.tipo;
+  let extra="";
+  if(a.tipo==="palestra"&&a.palestrante)extra=`<br><span class="muted">Palestrante: ${a.palestrante}${a.topico?" · "+a.topico:""}</span>`;
+  if(a.tipo==="coffee")extra=`<br><span class="muted">${a.fornecedor||""} ${a.coffeeStatus?"["+a.coffeeStatus+"]":""}</span>`;
+  if(a.observacoes)extra+=`<br><span class="muted">📝 ${a.observacoes}</span>`;
+  return `<tr><td>${a.horario||""}</td><td><span class="tag">${tipoLabel}</span></td><td><strong>${a.titulo||""}</strong>${extra}</td><td>${a.local||""}</td><td>${a.responsavel||""}</td><td>${a.status}</td></tr>`;
+}).join("")}
+</tbody></table>`}`;
+}).join("")}`;
+    downloadHTML("agenda_evento","Conheça o IFSP — Agenda",body);
+  };
+
   return(
     <div className="space-y-5">
       <div><h1 className="text-2xl font-bold text-white">Exportar</h1><p className="text-sm text-slate-400">Apenas para Gestores</p></div>
@@ -1474,6 +2038,16 @@ ${perf.map(p=>`<tr><td>${p.nome}</td><td>${p.total}</td><td>${p.concluidos}</td>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button onClick={expDesempenhoCSV} className="bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileSpreadsheet className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">Excel (.csv)</div></div></button>
           <button onClick={expDesempenhoHTML} className="bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileText className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">PDF (via HTML)</div></div></button>
+        </div>
+      </div>
+
+      {/* Conheça o IFSP */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h3 className="text-sm font-bold text-emerald-400 mb-1 flex items-center gap-2"><CalendarDays className="w-4 h-4"/>Agenda — Conheça o IFSP</h3>
+        <p className="text-xs text-slate-400 mb-4">Programação completa dos dias do evento.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button onClick={expEventoCSV} className="bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileSpreadsheet className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">Excel (.csv)</div></div></button>
+          <button onClick={expEventoHTML} className="bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileText className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">PDF (via HTML)</div></div></button>
         </div>
       </div>
 
