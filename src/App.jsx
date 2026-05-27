@@ -150,6 +150,15 @@ const GRUPOS = ["Gestão","Eventos","Doc. A","Doc. B"];
 const fmtT = ts => new Date(ts).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
 const fmtD = ts => ts ? new Date(ts).toLocaleDateString('pt-BR') : "—";
 const fmtDT = ts => ts ? new Date(ts).toLocaleString('pt-BR') : "—";
+const fmtDuracao = ms => {
+  if(!ms||ms<0)return "—";
+  const s=Math.floor(ms/1000);
+  if(s<60)return `${s}s`;
+  const m=Math.floor(s/60);
+  if(m<60)return `${m}min ${s%60}s`;
+  const h=Math.floor(m/60);
+  return `${h}h ${m%60}min`;
+};
 const validEmail = e => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 const isAtrasado = d => d.status==="Concluído"||d.status==="Cancelado" ? false : d.prazo ? Date.now()>d.prazo : false;
 const noPrazo = d => d.status!=="Concluído"||!d.primeiroPrazo||!d.dataConclusao ? null : d.dataConclusao<=d.primeiroPrazo;
@@ -284,11 +293,44 @@ export default function App(){
       const p={...(ref.current.presence||{})};
       Object.keys(p).forEach(k=>{if(now-(p[k]?.ts||0)>90000)delete p[k];});
       p[user.name]={ts:now,role:user.role,grupo:user.grupo};
-      const ns={...ref.current,presence:p};
+      let ns={...ref.current,presence:p};
+      // Atualiza tempo de permanência do visitante na entrada de histórico mais recente
+      if(user.role==="visitante"){
+        const idx=(ns.history||[]).findIndex(h=>h.action==="visit"&&h.user===user.name&&h.email===user.email&&h.sessionId===user.sessionId);
+        if(idx>=0){
+          const h=ns.history[idx];
+          const duracaoMs=now-h.ts;
+          const novoHist=[...ns.history];
+          novoHist[idx]={...h,duracaoMs,lastSeen:now};
+          ns={...ns,history:novoHist};
+        }
+      }
       setState(ns);save(ns);
     };
     tick();const i=setInterval(tick,30000);return()=>clearInterval(i);
   },[user,loaded,save]);
+
+  // Registra entrada do visitante (uma única vez por sessão)
+  useEffect(()=>{
+    if(!user||!loaded)return;
+    if(user.role!=="visitante")return;
+    if(user._registered)return;
+    const sessionId=user.sessionId||`${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+    const entry={
+      action:"visit",
+      user:user.name,
+      email:user.email,
+      role:"visitante",
+      sessionId,
+      ts:Date.now(),
+      lastSeen:Date.now(),
+      duracaoMs:0
+    };
+    setUser({...user,sessionId,_registered:true});
+    const ns=addHist(ref.current,entry);
+    setState(ns);save(ns);
+    // eslint-disable-next-line
+  },[user,loaded]);
 
   // Sync remoto
   useEffect(()=>{
@@ -459,7 +501,7 @@ export default function App(){
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-5">
         {tab==="dashboard"&&<Dashboard docs={state.docs} history={state.history} cancelReqs={state.cancelReqs} isGestor={user.role==="gestor"}/>}
         {tab==="documentos"&&<DocList state={state} user={user} onStatus={updateStatus} onComment={addComment} onPrazo={updatePrazo} onResp={updateResp} onGrupo={updateGrupo} onAddDoc={addDoc} onRemoveDoc={removeDoc} onCancel={cancelDoc} onApprove={approveCancel} onReativar={reativar}/>}
-        {tab==="atividades"&&<Atividades history={state.history} isV={isV} users={state.users}/>}
+        {tab==="atividades"&&<Atividades history={state.history} isV={isV} users={state.users} isGestor={user.role==="gestor"}/>}
         {tab==="desempenho"&&<Desempenho docs={state.docs} history={state.history} users={state.users}/>}
         {tab==="usuarios"&&user.role==="gestor"&&<Usuarios users={state.users} currentUser={user} onAdd={addUser} onEdit={editUser} onToggle={toggleActive} onRemove={removeUser}/>}
         {tab==="exportar"&&user.role==="gestor"&&<Export state={state}/>}
@@ -666,6 +708,7 @@ function DocList({state,user,onStatus,onComment,onPrazo,onResp,onGrupo,onAddDoc,
   const{docs,comments,history,cancelReqs,users}=state;
   const[q,setQ]=useState("");const[fG,setFG]=useState("Todos");const[fS,setFS]=useState("Ativos");const[fA,setFA]=useState(false);
   const[exp,setExp]=useState(null);const[showAdd,setShowAdd]=useState(false);
+  const[viewMode,setViewMode]=useState("categoria"); // "categoria" | "prazo"
 
   const fil=useMemo(()=>docs.filter(d=>{
     if(q&&!d.doc.toLowerCase().includes(q.toLowerCase())&&!d.id.includes(q))return false;
@@ -677,24 +720,40 @@ function DocList({state,user,onStatus,onComment,onPrazo,onResp,onGrupo,onAddDoc,
 
   const grouped=useMemo(()=>{const g={};fil.forEach(d=>{(g[d.cat]=g[d.cat]||[]).push(d);});return g;},[fil]);
 
+  // Ordenação por prazo: prazo mais próximo primeiro; sem prazo no final
+  const sortedByPrazo=useMemo(()=>{
+    const comPrazo=fil.filter(d=>d.prazo).sort((a,b)=>a.prazo-b.prazo);
+    const semPrazo=fil.filter(d=>!d.prazo);
+    return{comPrazo,semPrazo};
+  },[fil]);
+
   return(
     <div className="space-y-4">
       <div className="flex items-end justify-between gap-2 flex-wrap">
         <div><h1 className="text-2xl font-bold text-white">Documentos</h1><p className="text-sm text-slate-400">{fil.length} de {docs.length}</p></div>
         {user.role==="gestor"&&<button onClick={()=>setShowAdd(true)} className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg"><Plus className="w-4 h-4"/>Novo</button>}
       </div>
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4 flex flex-col sm:flex-row gap-2 sm:gap-3">
-        <div className="relative flex-1"><Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-500"/>
-          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar..." className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg pl-9 pr-3 py-2 focus:outline-none focus:border-emerald-500"/></div>
-        <select value={fG} onChange={e=>setFG(e.target.value)} className="bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500">
-          <option value="Todos">Todos os grupos</option>{GRUPOS.map(g=><option key={g}>{g}</option>)}</select>
-        <select value={fS} onChange={e=>setFS(e.target.value)} className="bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500">
-          <option value="Ativos">Só ativos</option><option value="Todos">Todos (com cancelados)</option>
-          {STATUS_LIST.map(s=><option key={s}>{s}</option>)}</select>
-        <button onClick={()=>setFA(!fA)} className={`px-3 py-2 text-xs font-semibold rounded-lg border flex items-center gap-1.5 ${fA?"bg-red-900/40 border-red-700 text-red-300":"bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200"}`}>
-          <AlertTriangle className="w-3.5 h-3.5"/>Atrasados</button>
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4 space-y-3">
+        <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
+          <div className="relative flex-1"><Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-500"/>
+            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar..." className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg pl-9 pr-3 py-2 focus:outline-none focus:border-emerald-500"/></div>
+          <select value={fG} onChange={e=>setFG(e.target.value)} className="bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500">
+            <option value="Todos">Todos os grupos</option>{GRUPOS.map(g=><option key={g}>{g}</option>)}</select>
+          <select value={fS} onChange={e=>setFS(e.target.value)} className="bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500">
+            <option value="Ativos">Só ativos</option><option value="Todos">Todos (com cancelados)</option>
+            {STATUS_LIST.map(s=><option key={s}>{s}</option>)}</select>
+          <button onClick={()=>setFA(!fA)} className={`px-3 py-2 text-xs font-semibold rounded-lg border flex items-center gap-1.5 ${fA?"bg-red-900/40 border-red-700 text-red-300":"bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200"}`}>
+            <AlertTriangle className="w-3.5 h-3.5"/>Atrasados</button>
+        </div>
+        <div className="flex items-center gap-2 pt-2 border-t border-slate-800">
+          <span className="text-[10px] uppercase text-slate-500 font-semibold">Visualizar:</span>
+          <button onClick={()=>setViewMode("categoria")} className={`px-3 py-1.5 text-xs font-semibold rounded-lg flex items-center gap-1.5 ${viewMode==="categoria"?"bg-emerald-600 text-white":"bg-slate-800 text-slate-400 hover:text-slate-200"}`}>
+            <ListChecks className="w-3.5 h-3.5"/>Por categoria</button>
+          <button onClick={()=>setViewMode("prazo")} className={`px-3 py-1.5 text-xs font-semibold rounded-lg flex items-center gap-1.5 ${viewMode==="prazo"?"bg-emerald-600 text-white":"bg-slate-800 text-slate-400 hover:text-slate-200"}`}>
+            <Calendar className="w-3.5 h-3.5"/>Por prazo</button>
+        </div>
       </div>
-      {Object.keys(grouped).sort().map(cat=>(
+      {viewMode==="categoria"&&Object.keys(grouped).sort().map(cat=>(
         <div key={cat} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
           <div className="px-4 py-2.5 bg-slate-800/50 border-b border-slate-800"><h2 className="text-sm font-bold text-emerald-400">{cat}</h2></div>
           <div className="divide-y divide-slate-800">
@@ -708,6 +767,44 @@ function DocList({state,user,onStatus,onComment,onPrazo,onResp,onGrupo,onAddDoc,
           </div>
         </div>
       ))}
+      {viewMode==="prazo"&&(
+        <>
+          {sortedByPrazo.comPrazo.length>0&&(
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 bg-slate-800/50 border-b border-slate-800 flex items-center gap-2">
+                <Calendar className="w-4 h-4 text-emerald-400"/>
+                <h2 className="text-sm font-bold text-emerald-400">Por prazo (mais próximos primeiro)</h2>
+              </div>
+              <div className="divide-y divide-slate-800">
+                {sortedByPrazo.comPrazo.map(d=>(
+                  <DocRow key={d.id} doc={d} user={user} users={users} showCat={true}
+                    comments={comments[d.id]||[]} history={history.filter(h=>h.docId===d.id)}
+                    cancelReq={cancelReqs?.[d.id]} expanded={exp===d.id} onToggle={()=>setExp(exp===d.id?null:d.id)}
+                    onStatus={onStatus} onComment={onComment} onPrazo={onPrazo} onResp={onResp} onGrupo={onGrupo}
+                    onRemoveDoc={onRemoveDoc} onCancel={onCancel} onApprove={onApprove} onReativar={onReativar}/>
+                ))}
+              </div>
+            </div>
+          )}
+          {sortedByPrazo.semPrazo.length>0&&(
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 bg-slate-800/50 border-b border-slate-800 flex items-center gap-2">
+                <Clock className="w-4 h-4 text-slate-400"/>
+                <h2 className="text-sm font-bold text-slate-400">Sem prazo definido ({sortedByPrazo.semPrazo.length})</h2>
+              </div>
+              <div className="divide-y divide-slate-800">
+                {sortedByPrazo.semPrazo.map(d=>(
+                  <DocRow key={d.id} doc={d} user={user} users={users} showCat={true}
+                    comments={comments[d.id]||[]} history={history.filter(h=>h.docId===d.id)}
+                    cancelReq={cancelReqs?.[d.id]} expanded={exp===d.id} onToggle={()=>setExp(exp===d.id?null:d.id)}
+                    onStatus={onStatus} onComment={onComment} onPrazo={onPrazo} onResp={onResp} onGrupo={onGrupo}
+                    onRemoveDoc={onRemoveDoc} onCancel={onCancel} onApprove={onApprove} onReativar={onReativar}/>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
       {fil.length===0&&<div className="bg-slate-900 border border-slate-800 rounded-xl p-12 text-center text-slate-500 text-sm">Nenhum documento encontrado</div>}
       {showAdd&&<AddDocModal onClose={()=>setShowAdd(false)} onAdd={onAddDoc} existingDocs={docs}/>}
     </div>
@@ -751,7 +848,7 @@ function AddDocModal({onClose,onAdd,existingDocs}){
   );
 }
 
-function DocRow({doc,user,users,comments,history,cancelReq,expanded,onToggle,onStatus,onComment,onPrazo,onResp,onGrupo,onRemoveDoc,onCancel,onApprove,onReativar}){
+function DocRow({doc,user,users,comments,history,cancelReq,expanded,onToggle,onStatus,onComment,onPrazo,onResp,onGrupo,onRemoveDoc,onCancel,onApprove,onReativar,showCat=false}){
   const[nc,setNC]=useState("");const[sMenu,setSMenu]=useState(false);const[eprazo,setEP]=useState(false);const[egrupo,setEG]=useState(false);
   const[np,setNP]=useState("");const[op,setOP]=useState("");const[ng,setNG]=useState("");const[og,setOG]=useState("");
   const[fb,setFB]=useState(null);const[cModal,setCModal]=useState(false);const[cMot,setCMot]=useState("");const[delModal,setDel]=useState(false);
@@ -761,6 +858,17 @@ function DocRow({doc,user,users,comments,history,cancelReq,expanded,onToggle,onS
   const isG=user.role==="gestor";const isV=user.role==="visitante";
   const canGrp=isG||(user.role==="integrante"&&doc.grupo===user.grupo);
   const intList=Object.keys(users||{});
+
+  // Calcula dias restantes/atraso para exibição no modo prazo
+  const diasInfo=useMemo(()=>{
+    if(!doc.prazo||canc||doc.status==="Concluído")return null;
+    const diff=Math.ceil((doc.prazo-Date.now())/(1000*60*60*24));
+    if(diff<0)return{txt:`${Math.abs(diff)}d atraso`,cls:"bg-red-950/60 text-red-300"};
+    if(diff===0)return{txt:"Vence hoje",cls:"bg-orange-950/60 text-orange-300"};
+    if(diff<=3)return{txt:`${diff}d restantes`,cls:"bg-amber-950/60 text-amber-300"};
+    if(diff<=7)return{txt:`${diff}d restantes`,cls:"bg-yellow-950/40 text-yellow-300"};
+    return{txt:`${diff}d restantes`,cls:"bg-slate-800 text-slate-300"};
+  },[doc.prazo,doc.status,canc]);
 
   const doStatus=s=>{setSMenu(false);if(s===doc.status)return;const r=onStatus(doc.id,s);if(!r.ok){setFB({t:"err",m:r.msg});setTimeout(()=>setFB(null),4000);}else if(user.role==="integrante"){setFB({t:"inf",m:"Status alterado. Gestores notificados."});setTimeout(()=>setFB(null),4000);}};
   const doComment=()=>{if(!nc.trim())return;onComment(doc.id,nc);setNC("");};
@@ -784,9 +892,11 @@ function DocRow({doc,user,users,comments,history,cancelReq,expanded,onToggle,onS
             {cancelReq&&<span className="text-[10px] bg-purple-950/60 text-purple-300 px-1.5 py-0.5 rounded font-bold flex items-center gap-1 uppercase"><Ban className="w-2.5 h-2.5"/>Cancelamento pendente</span>}
           </div>
           <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+            {showCat&&<span className="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider bg-emerald-950/40 text-emerald-300 border border-emerald-900/40">{doc.cat}</span>}
             <span className="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider" style={{background:gc.bg,color:gc.tx}}>{doc.grupo}</span>
             <span className="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider" style={{background:dc.bg,color:dc.tx}}>{doc.dif}</span>
             {doc.prazo&&<span className={`text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded ${atras?"bg-red-950/40 text-red-400":"bg-slate-800 text-slate-400"}`}><Calendar className="w-2.5 h-2.5"/>{fmtD(doc.prazo)}</span>}
+            {diasInfo&&<span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${diasInfo.cls}`}>{diasInfo.txt}</span>}
             {doc.responsavel?<span className="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-800 text-slate-300"><User className="w-2.5 h-2.5"/>{doc.responsavel}</span>:
              !canc&&<span className="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-400 font-semibold"><UserPlus className="w-2.5 h-2.5"/>Sem responsável</span>}
             {!isV&&comments.length>0&&<span className="text-[10px] flex items-center gap-1 text-slate-400"><MessageSquare className="w-3 h-3"/>{comments.length}</span>}
@@ -940,11 +1050,12 @@ function DocRow({doc,user,users,comments,history,cancelReq,expanded,onToggle,onS
 }
 
 // ATIVIDADES
-function Atividades({history,isV,users}){
+function Atividades({history,isV,users,isGestor}){
   const[f,setF]=useState("Todos");
-  const vis=useMemo(()=>isV?history.filter(h=>["status_change","prazo_change","visit","doc_added","cancel_approved","doc_reactivated"].includes(h.action)):history,[history,isV]);
+  const vis=useMemo(()=>isV?history.filter(h=>["status_change","prazo_change","doc_added","cancel_approved","doc_reactivated"].includes(h.action)):history,[history,isV]);
   const fil=useMemo(()=>{
-    if(f==="Todos")return vis;if(f==="Visitas")return vis.filter(h=>h.action==="visit");
+    if(f==="Todos")return vis.filter(h=>h.action!=="visit"); // visitas em filtro próprio
+    if(f==="Visitantes externos")return vis.filter(h=>h.action==="visit");
     if(f==="Prazos")return vis.filter(h=>h.action==="prazo_change");
     if(f==="Cancelamentos")return vis.filter(h=>["cancel_request","cancel_approved","cancel_rejected"].includes(h.action));
     if(f==="Documentos")return vis.filter(h=>["doc_added","doc_removed","doc_reactivated"].includes(h.action));
@@ -952,14 +1063,35 @@ function Atividades({history,isV,users}){
     return vis.filter(h=>h.grupo===f);
   },[vis,f]);
 
+  // Estatísticas de visitantes (só gestores)
+  const visStats=useMemo(()=>{
+    if(!isGestor)return null;
+    const visits=history.filter(h=>h.action==="visit");
+    const totalSec=visits.reduce((s,v)=>s+(v.duracaoMs||0),0)/1000;
+    const avgSec=visits.length?Math.round(totalSec/visits.length):0;
+    return{total:visits.length,avgSec};
+  },[history,isGestor]);
+
   return(
     <div className="space-y-4">
       <div><h1 className="text-2xl font-bold text-white">Atividades</h1><p className="text-sm text-slate-400">{isV?"Resumo de mudanças":"Histórico completo"}</p></div>
       <div className="flex gap-2 flex-wrap">
-        {["Todos","Gestão","Eventos","Doc. A","Doc. B","Prazos","Cancelamentos","Documentos",!isV&&"Usuários","Visitas"].filter(Boolean).map(x=>(
+        {["Todos","Gestão","Eventos","Doc. A","Doc. B","Prazos","Cancelamentos","Documentos",!isV&&"Usuários",isGestor&&"Visitantes externos"].filter(Boolean).map(x=>(
           <button key={x} onClick={()=>setF(x)} className={`px-3 py-1.5 text-xs font-semibold rounded-lg border ${f===x?"bg-emerald-600 border-emerald-500 text-white":"bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200"}`}>{x}</button>
         ))}
       </div>
+      {f==="Visitantes externos"&&isGestor&&visStats&&(
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+            <div className="text-[10px] uppercase text-slate-400 mb-1">Total de visitas</div>
+            <div className="text-2xl font-bold text-emerald-400">{visStats.total}</div>
+          </div>
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+            <div className="text-[10px] uppercase text-slate-400 mb-1">Tempo médio</div>
+            <div className="text-2xl font-bold text-blue-400">{fmtDuracao(visStats.avgSec*1000)}</div>
+          </div>
+        </div>
+      )}
       <div className="bg-slate-900 border border-slate-800 rounded-xl divide-y divide-slate-800">
         {fil.length===0?<div className="p-8 text-center text-sm text-slate-500">Nenhuma atividade</div>:fil.slice(0,200).map((a,i)=><AItem key={i} item={a} users={users}/>)}
       </div>
@@ -981,7 +1113,7 @@ function AItem({item,compact=false,users}){
           {item.role==="visitante"&&<span className="ml-1.5 text-[9px] text-slate-500">visitante</span>}
           {a==="status_change"&&<> → <span style={{color:sc.tx}} className="font-semibold">{item.to}</span> em <span className="text-slate-200 font-medium">{item.docId}</span></>}
           {a==="comment"&&<> comentou em <span className="text-slate-200 font-medium">{item.docId}</span></>}
-          {a==="visit"&&<> entrou no painel</>}
+          {a==="visit"&&<> entrou no painel{item.duracaoMs>0&&<span className="ml-1.5 text-[10px] bg-blue-950/40 text-blue-300 px-1.5 py-0.5 rounded font-semibold">{fmtDuracao(item.duracaoMs)}</span>}</>}
           {a==="prazo_change"&&<> {item.isFirstPrazo?"definiu":"alterou"} prazo de <span className="text-slate-200 font-medium">{item.docId}</span> → <span className="text-emerald-400 font-semibold">{fmtD(item.to)}</span>{item.reagendamentoAposVencido&&<span className="ml-1.5 text-[9px] bg-red-950/50 text-red-300 px-1 py-0.5 rounded">REAGENDADO</span>}</>}
           {a==="responsavel_change"&&<> definiu responsável em <span className="text-slate-200 font-medium">{item.docId}</span>: <span className="text-emerald-400">{item.to||"nenhum"}</span></>}
           {a==="grupo_change"&&<> transferiu <span className="text-slate-200 font-medium">{item.docId}</span>: <span className="text-amber-400">{item.from}</span> → <span className="text-emerald-400">{item.to}</span></>}
@@ -1219,32 +1351,147 @@ function NewUserModal({name,pwd,onClose}){
 
 // EXPORTAR
 function Export({state}){
-  const{docs,comments,history}=state;
-  const expCSV=()=>{
+  const{docs,comments,history,users}=state;
+
+  // Util: gera CSV a partir de matriz e dispara download
+  const downloadCSV=(filename,rows)=>{
+    const csv=rows.map(r=>r.map(c=>`"${String(c??"").replace(/"/g,'""')}"`).join(",")).join("\n");
+    const url=URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"}));
+    const a=document.createElement("a");a.href=url;a.download=`${filename}_${new Date().toISOString().slice(0,10)}.csv`;a.click();
+  };
+  // Util: gera HTML (PDF via navegador) e dispara download
+  const downloadHTML=(filename,title,bodyHTML)=>{
+    const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font-family:Arial,sans-serif;padding:30px;color:#222}h1{color:#006B3F;margin-bottom:5px}h2{color:#006B3F;margin-top:25px;border-bottom:1px solid #ccc;padding-bottom:5px}table{border-collapse:collapse;width:100%;font-size:11px;margin-top:10px}th{background:#006B3F;color:#fff;padding:8px;text-align:left}td{padding:6px 8px;border:1px solid #ccc;vertical-align:top}.atras{color:#991B1B;font-weight:bold}.canc{color:#6B7280;text-decoration:line-through}.muted{color:#6B7280;font-size:10px}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;background:#E5E7EB;color:#374151}.box{background:#F0F9F4;padding:15px;border-radius:8px;margin:15px 0}@media print{body{padding:15px}}</style></head><body>${bodyHTML}<p class="muted" style="margin-top:30px">Gerado em ${new Date().toLocaleString('pt-BR')} · IFSP Piracicaba — Projeto Extensão 2026</p></body></html>`;
+    const url=URL.createObjectURL(new Blob([html],{type:"text/html"}));
+    const a=document.createElement("a");a.href=url;a.download=`${filename}_${new Date().toISOString().slice(0,10)}.html`;a.click();
+  };
+
+  // ─── DOCUMENTOS ─────────────────────────────────
+  const expDocsCSV=()=>{
     const rows=[["ID","Documento","Categoria","Grupo","Dificuldade","Responsável","Status","1º Prazo","Prazo Atual","Conclusão","Atrasado","Cancelado","Comentários"]];
     docs.forEach(d=>rows.push([d.id,d.doc,d.cat,d.grupo,d.dif,d.responsavel||"",d.status,fmtD(d.primeiroPrazo),fmtD(d.prazo),fmtDT(d.dataConclusao),isAtrasado(d)?"Sim":"Não",d.status==="Cancelado"?"Sim":"Não",(comments[d.id]||[]).length]));
-    const csv=rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
-    const url=URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"}));
-    const a=document.createElement("a");a.href=url;a.download=`relatorio_${new Date().toISOString().slice(0,10)}.csv`;a.click();
+    downloadCSV("documentos",rows);
   };
-  const expHTML=()=>{
+  const expDocsHTML=()=>{
     const ativos=docs.filter(d=>d.status!=="Cancelado");const concl=ativos.filter(d=>d.status==="Concluído").length;const atras=docs.filter(d=>isAtrasado(d)).length;
-    const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Relatório 2026</title><style>body{font-family:Arial;padding:30px}h1{color:#006B3F}table{border-collapse:collapse;width:100%;font-size:11px;margin-top:15px}th{background:#006B3F;color:#fff;padding:8px;text-align:left}td{padding:6px 8px;border:1px solid #ccc}.atras{color:#991B1B;font-weight:bold}.canc{color:#6B7280;text-decoration:line-through}</style></head><body>
-<h1>Relatório — Projeto Extensão 2026</h1><p>IFSP Piracicaba · ${new Date().toLocaleString('pt-BR')}</p>
-<div style="background:#F0F9F4;padding:15px;border-radius:8px;margin:15px 0"><strong>Progresso:</strong> ${Math.round(concl/(ativos.length||1)*100)}% (${concl}/${ativos.length}) · <strong>Atrasados:</strong> ${atras} · <strong>Cancelados:</strong> ${docs.length-ativos.length}</div>
-<table><thead><tr><th>ID</th><th>Documento</th><th>Grupo</th><th>Responsável</th><th>Status</th><th>1º Prazo</th><th>Prazo</th><th>Conclusão</th></tr></thead><tbody>
-${docs.map(d=>`<tr class="${d.status==="Cancelado"?"canc":""}"><td>${d.id}</td><td>${d.doc}</td><td>${d.grupo}</td><td>${d.responsavel||""}</td><td>${d.status}${isAtrasado(d)?` <span class="atras">(ATRASADO)</span>`:""}</td><td>${fmtD(d.primeiroPrazo)}</td><td>${fmtD(d.prazo)}</td><td>${fmtDT(d.dataConclusao)}</td></tr>`).join("")}
-</tbody></table></body></html>`;
-    const url=URL.createObjectURL(new Blob([html],{type:"text/html"}));
-    const a=document.createElement("a");a.href=url;a.download=`relatorio_${new Date().toISOString().slice(0,10)}.html`;a.click();
+    const body=`<h1>Relatório — Documentos</h1>
+<div class="box"><strong>Progresso:</strong> ${Math.round(concl/(ativos.length||1)*100)}% (${concl}/${ativos.length}) · <strong>Atrasados:</strong> ${atras} · <strong>Cancelados:</strong> ${docs.length-ativos.length}</div>
+<table><thead><tr><th>ID</th><th>Documento</th><th>Categoria</th><th>Grupo</th><th>Responsável</th><th>Status</th><th>1º Prazo</th><th>Prazo</th><th>Conclusão</th></tr></thead><tbody>
+${docs.map(d=>`<tr class="${d.status==="Cancelado"?"canc":""}"><td>${d.id}</td><td>${d.doc}</td><td>${d.cat}</td><td>${d.grupo}</td><td>${d.responsavel||""}</td><td>${d.status}${isAtrasado(d)?` <span class="atras">(ATRASADO)</span>`:""}</td><td>${fmtD(d.primeiroPrazo)}</td><td>${fmtD(d.prazo)}</td><td>${fmtDT(d.dataConclusao)}</td></tr>`).join("")}
+</tbody></table>`;
+    downloadHTML("documentos","Documentos — Extensão 2026",body);
   };
+
+  // ─── ATIVIDADES ─────────────────────────────────
+  const expHistCSV=()=>{
+    const rows=[["Data","Usuário","Tipo","Ação","Documento","De","Para","Detalhes"]];
+    history.forEach(h=>rows.push([fmtDT(h.ts),h.user||"",h.role||"",h.action,h.docId||h.targetUser||"",h.from||"",h.to||"",h.text||h.motivo||h.observacao||h.changes||""]));
+    downloadCSV("atividades",rows);
+  };
+  const expHistHTML=()=>{
+    const body=`<h1>Relatório — Atividades / Histórico</h1>
+<p class="muted">${history.length} registros</p>
+<table><thead><tr><th>Data</th><th>Usuário</th><th>Ação</th><th>Documento</th><th>Detalhes</th></tr></thead><tbody>
+${history.slice(0,500).map(h=>`<tr><td>${fmtDT(h.ts)}</td><td>${h.user||""} <span class="muted">(${h.role||""})</span></td><td>${h.action}</td><td>${h.docId||h.targetUser||""}</td><td>${(h.text||h.motivo||h.observacao||h.changes||(h.to?`→ ${h.to}`:"")||"")}</td></tr>`).join("")}
+</tbody></table>
+${history.length>500?`<p class="muted">Mostrando 500 registros mais recentes de ${history.length} totais.</p>`:""}`;
+    downloadHTML("atividades","Atividades — Extensão 2026",body);
+  };
+
+  // ─── DESEMPENHO ─────────────────────────────────
+  const calcPerf=()=>{
+    const integrantes=Object.entries(users||{}).filter(([_,u])=>u.role==="integrante").map(([n])=>n);
+    return integrantes.map(nome=>{
+      const meus=docs.filter(d=>d.responsavel===nome);
+      const concluidos=meus.filter(d=>d.status==="Concluído").length;
+      const cancelados=meus.filter(d=>d.status==="Cancelado").length;
+      const foraPrazo=meus.filter(d=>{
+        if(d.status!=="Concluído"||!d.primeiroPrazo||!d.dataConclusao)return false;
+        return d.dataConclusao>d.primeiroPrazo;
+      }).length;
+      const reagendados=meus.filter(d=>d.primeiroPrazo&&d.prazo&&d.prazo!==d.primeiroPrazo).length;
+      return{nome,total:meus.length,concluidos,cancelados,foraPrazo,reagendados,pct:meus.length?Math.round(concluidos/meus.length*100):0};
+    });
+  };
+  const expDesempenhoCSV=()=>{
+    const perf=calcPerf();
+    const rows=[["Integrante","Total de docs","Concluídos","Fora do prazo","Reagendados","Cancelados","% Conclusão"]];
+    perf.forEach(p=>rows.push([p.nome,p.total,p.concluidos,p.foraPrazo,p.reagendados,p.cancelados,p.pct+"%"]));
+    downloadCSV("desempenho",rows);
+  };
+  const expDesempenhoHTML=()=>{
+    const perf=calcPerf();
+    const body=`<h1>Relatório — Desempenho Individual</h1>
+<table><thead><tr><th>Integrante</th><th>Total</th><th>Concluídos</th><th>Fora do prazo</th><th>Reagendados</th><th>Cancelados</th><th>% Conclusão</th></tr></thead><tbody>
+${perf.map(p=>`<tr><td>${p.nome}</td><td>${p.total}</td><td>${p.concluidos}</td><td>${p.foraPrazo}</td><td>${p.reagendados}</td><td>${p.cancelados}</td><td><strong>${p.pct}%</strong></td></tr>`).join("")}
+</tbody></table>`;
+    downloadHTML("desempenho","Desempenho — Extensão 2026",body);
+  };
+
+  // ─── USUÁRIOS ───────────────────────────────────
+  const expUsuariosCSV=()=>{
+    const rows=[["Nome","Tipo","Grupo","Ativo"]];
+    Object.entries(users||{}).forEach(([n,u])=>rows.push([n,u.role,u.grupo,u.ativo?"Sim":"Não"]));
+    downloadCSV("usuarios",rows);
+  };
+
+  // ─── VISITANTES EXTERNOS ────────────────────────
+  const expVisitantesCSV=()=>{
+    const vs=history.filter(h=>h.action==="visit");
+    const rows=[["Nome","E-mail","Entrada","Última atividade","Duração"]];
+    vs.forEach(v=>rows.push([v.user,v.email||"",fmtDT(v.ts),v.lastSeen?fmtDT(v.lastSeen):"—",fmtDuracao(v.duracaoMs||0)]));
+    downloadCSV("visitantes",rows);
+  };
+
   return(
     <div className="space-y-5">
       <div><h1 className="text-2xl font-bold text-white">Exportar</h1><p className="text-sm text-slate-400">Apenas para Gestores</p></div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <button onClick={expCSV} className="bg-slate-900 border border-slate-800 hover:border-emerald-600 rounded-xl p-6 text-left"><FileSpreadsheet className="w-8 h-8 text-emerald-400 mb-3"/><div className="text-base font-bold text-white mb-1">Excel (.csv)</div><p className="text-xs text-slate-400">Com prazos, responsáveis, atrasos e cancelamentos.</p></button>
-        <button onClick={expHTML} className="bg-slate-900 border border-slate-800 hover:border-emerald-600 rounded-xl p-6 text-left"><FileText className="w-8 h-8 text-emerald-400 mb-3"/><div className="text-base font-bold text-white mb-1">PDF (via HTML)</div><p className="text-xs text-slate-400">Abra no navegador e use "Salvar como PDF".</p></button>
+
+      {/* Documentos */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h3 className="text-sm font-bold text-emerald-400 mb-1 flex items-center gap-2"><ListChecks className="w-4 h-4"/>Documentos</h3>
+        <p className="text-xs text-slate-400 mb-4">Lista completa com prazos, responsáveis e status.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button onClick={expDocsCSV} className="bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileSpreadsheet className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">Excel (.csv)</div><div className="text-[11px] text-slate-400">Para análise em planilha</div></div></button>
+          <button onClick={expDocsHTML} className="bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileText className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">PDF (via HTML)</div><div className="text-[11px] text-slate-400">Salvar como PDF no navegador</div></div></button>
+        </div>
       </div>
+
+      {/* Atividades */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h3 className="text-sm font-bold text-emerald-400 mb-1 flex items-center gap-2"><Activity className="w-4 h-4"/>Atividades / Histórico</h3>
+        <p className="text-xs text-slate-400 mb-4">Auditoria de todas as alterações.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button onClick={expHistCSV} className="bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileSpreadsheet className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">Excel (.csv)</div><div className="text-[11px] text-slate-400">Histórico completo</div></div></button>
+          <button onClick={expHistHTML} className="bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileText className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">PDF (via HTML)</div><div className="text-[11px] text-slate-400">Últimos 500 registros</div></div></button>
+        </div>
+      </div>
+
+      {/* Desempenho */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h3 className="text-sm font-bold text-emerald-400 mb-1 flex items-center gap-2"><TrendingUp className="w-4 h-4"/>Desempenho individual</h3>
+        <p className="text-xs text-slate-400 mb-4">Métricas por integrante.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button onClick={expDesempenhoCSV} className="bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileSpreadsheet className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">Excel (.csv)</div></div></button>
+          <button onClick={expDesempenhoHTML} className="bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileText className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">PDF (via HTML)</div></div></button>
+        </div>
+      </div>
+
+      {/* Usuários e Visitantes */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+          <h3 className="text-sm font-bold text-emerald-400 mb-1 flex items-center gap-2"><Users className="w-4 h-4"/>Usuários</h3>
+          <p className="text-xs text-slate-400 mb-4">Lista sem senhas.</p>
+          <button onClick={expUsuariosCSV} className="w-full bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileSpreadsheet className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">Excel (.csv)</div></div></button>
+        </div>
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+          <h3 className="text-sm font-bold text-emerald-400 mb-1 flex items-center gap-2"><UserCheck className="w-4 h-4"/>Visitantes externos</h3>
+          <p className="text-xs text-slate-400 mb-4">Acessos da comunidade.</p>
+          <button onClick={expVisitantesCSV} className="w-full bg-slate-800 border border-slate-700 hover:border-emerald-600 rounded-lg p-4 text-left flex items-center gap-3"><FileSpreadsheet className="w-6 h-6 text-emerald-400"/><div><div className="text-sm font-semibold text-white">Excel (.csv)</div></div></button>
+        </div>
+      </div>
+
+      {/* Snapshot */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
         <h3 className="text-sm font-semibold text-slate-200 mb-4">Snapshot</h3>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
